@@ -20,8 +20,6 @@ from metrics import accuracy_tuned, f1_tuned, precision_tuned, recall_tuned
 import collections.abc
 import copy
 
-
-
 class TwoLayersClassifier(BaseEstimator, ClassifierMixin):
     def __init__(self, **kwargs):
         if 'classifier' in kwargs:
@@ -104,24 +102,23 @@ target = data['answer'].to_numpy()
 target_xboost = [x-1 for x in target]
 target = target_xboost
 
-features, target = RandomOverSampler(random_state=0).fit_resample(features, target)
-features_train, features_test, target_train, target_test = train_test_split(features, target, test_size=0.2, random_state=42)
+
+repetitions = 5
+data = []
+for i in range(repetitions):
+    features_train, features_test, target_train, target_test = model_selection.train_test_split(features, target, test_size=0.2, random_state=i)
+    features_train, target_train = RandomOverSampler(random_state=0).fit_resample(features_train, target_train)
+    row = {
+        'features_train': features_train,
+        'features_test': features_test,
+        'target_train': target_train,
+        'target_test': target_test
+    }
+    data.append(row)
 
 
 predictores = []
 
-model = TwoLayersClassifier(classifier=RandomForestClassifier)
-params = {
-    'classifier': [RandomForestClassifier],
-    'n_estimators': [int(x) for x in np.linspace(10, 100, num = 18)],
-    'criterion': ['gini', 'entropy', 'log_loss'],    
-    'min_samples_split': [int(x) for x in np.linspace(2, 11, num = 10)],
-    'min_samples_leaf': [int(x) for x in np.linspace(1, 11, num = 11)],
-    'max_depth': [int(x) for x in np.linspace(5, 50, num = 10)],
-    'max_features': [int(x) for x in np.linspace(1, 64, num = 16)],    
-    'min_weight_fraction_leaf': [0, 1, 2, 4, 8, 16]
-}
-predictores.append({ 'name': 'TwoLayersClassifier', 'model': model, 'params': params })
 
 ###### DUMMY ######
 model = TwoLayersClassifier(classifier=dummy.DummyClassifier)
@@ -176,7 +173,8 @@ predictores.append({ 'name': 'RidgeClassifier', 'model': model, 'params': params
 model = TwoLayersClassifier(classifier=svm.SVC)
 params = {
     'classifier': [svm.SVC],
-    "C": [uniform.rvs(0.01, 10) for i in range(0, 10)]
+    "C": [uniform.rvs(0.01, 10) for i in range(0, 10)],
+    'kernel': ['linear']
 }
 predictores.append({ 'name': 'SVC', 'model': model, 'params': params })
 
@@ -225,55 +223,49 @@ params = {
 }
 predictores.append({ 'name': 'XGBOOST', 'model': model, 'params': params })
 
+
+
 best_score = 0
 for predictor in predictores:
     model = predictor['model']
     params = predictor['params']
 
-    combinations = 1
-    for idx in params:
-        if (isinstance(params[idx], collections.abc.Sequence) == True):
-            combinations = combinations * len(params[idx])
+    combinations = 100 * len(params)
+
+    for i in range(repetitions):
+        row = data[i]
+        features_train = row['features_train']
+        target_train = row['target_train']
+
+        fold_count=5
+        kf = KFold(n_splits=fold_count, shuffle=True)
+
+        clf = model_selection.RandomizedSearchCV(estimator=model, param_distributions=params, n_iter=combinations, scoring='accuracy', n_jobs=-1, cv=kf, verbose=10)
+        search = clf.fit(features_train, target_train)
+
+        if i == 0:
+            predictor['best_score'] = []
+            predictor['best_params'] = []
+
+        predictor['best_score'].append(search.best_score_)
+        predictor['best_params'].append(search.best_params_)
+
+        if search.best_score_ > best_score:
+            best_score = search.best_score_
+
+        with open('output/results.out', 'a') as f:
+            f.write("Running training " + str(i) + ": " + predictor['name'] + '\n\n')
     
-    if (combinations <= pow(2, 10)):
-        combinations = combinations * 1.3
-    else:
-        combinations = min(combinations * 0.5, pow(2,12))
-
-
-    fold_count=5
-    kf = KFold(n_splits=fold_count, shuffle=True)
-
-    features_train, features_test, target_train, target_test = model_selection.train_test_split(features, target, test_size=0.2, random_state=42)
-
-
-    clf = model_selection.RandomizedSearchCV(estimator=model, param_distributions=params, n_iter=combinations, scoring='accuracy', n_jobs=-1, cv=kf, verbose=2)
-    search = clf.fit(features_train, target_train)
-
-    predictor['best_score'] = search.best_score_
-    predictor['best_params'] = search.best_params_
-    predictor['accuracy'] = max(np.nan_to_num(clf.cv_results_['mean_test_score']))
-
-    if search.best_score_ > best_score:
-        best_score = search.best_score_
+    predictor['best_score_mean'] = np.mean(predictor['best_score'])
+    print(predictor['best_score'])
+    print(predictor['best_score_mean'])
 
     with open('output/results.out', 'a') as f:
+        f.write("Training \n")
         f.write("Predictor: " + predictor['name'] + '\n')
         f.write("Best Score: " + str(predictor['best_score']) + '\n')
-        f.write("Best Params: " + str(predictor['best_params']) + '\n')
-        f.write("Accuracy: " + str(predictor['accuracy']) + '\n')
+        f.write("Best Params: " + str(predictor['best_score_mean']) + '\n')
         f.write('\n\n')
-
-for predictor in predictores:
-    print(predictor['name'])
-    print("Best Score", predictor['best_score'])
-    print("Best Params", predictor['best_params'])
-    print("Accuracy", predictor['accuracy'])
-
-print()
-print("Best Score")
-print(best_score)
-
 
 
 
@@ -283,69 +275,74 @@ def test_method(model, params):
     model.set_params(**params)
     target_predicted = model.fit(features_train, target_train).predict(features_test)
 
-    print('Accuracy', accuracy_score(target_test, target_predicted))
-    print('Precision', precision_score(target_test, target_predicted, average='macro'))
-    print('Recall', recall_score(target_test, target_predicted, average='macro'))
-    print('F1', f1_score(target_test, target_predicted, average='macro'))
-    print("")
+    accuracy = accuracy_score(target_test, target_predicted)
+    precision = precision_score(target_test, target_predicted, average='macro')
+    recall = recall_score(target_test, target_predicted, average='macro')
+    f1 = f1_score(target_test, target_predicted, average='macro')
+    return {
+        'accuracy': accuracy, 
+        'precision': precision, 
+        'recall': recall, 
+        'f1': f1
+    }
 
+print("\nTESTS\n")
+for predictor in predictores:
+    name = predictor['name']
+    model = predictor['model']
+    
+    accuracies_test = []
+    precisions_test = []
+    recalls_test = []
+    f1s_test = []
 
-features_train, features_test, target_train, target_test = model_selection.train_test_split(features, target, test_size=0.2, random_state=42)
+    for i in range(repetitions):        
+        params = predictor['best_params'][i]
 
-models_test = [
-    { 
-        'name': 'Dummy',
-        'model': TwoLayersClassifier(classifier=dummy.DummyClassifier),
-        'params': {'strategy': 'constant', 'constant': 1, 'classifier': dummy.DummyClassifier}
-    },
-    { 
-        'name': 'NB',
-        'model': TwoLayersClassifier(classifier=naive_bayes.GaussianNB),
-        'params': {'var_smoothing': 0.01519911082952933, 'classifier': naive_bayes.GaussianNB}
-    },
-    { 
-        'name': 'KNN',
-        'model': TwoLayersClassifier(classifier=neighbors.KNeighborsClassifier),
-        'params': {'weights': 'distance', 'p': 1, 'n_neighbors': 2, 'classifier': neighbors.KNeighborsClassifier, 'algorithm': 'auto'}
-    },     
-    { 
-        'name': 'LR',
-        'model': TwoLayersClassifier(classifier=linear_model.LogisticRegression),
-        'params': {'solver': 'liblinear', 'penalty': 'l2', 'classifier': linear_model.LogisticRegression, 'C': 93.2918810681356}
-    },    
-    { 
-        'name': 'Linear',
-        'model': TwoLayersClassifier(classifier=linear_model.RidgeClassifier),
-        'params': {'solver': 'auto', 'classifier': linear_model.RidgeClassifier, 'alpha': 90.6338299951236}
-    },
-    { 
-        'name': 'SVM',
-        'model': TwoLayersClassifier(classifier=svm.SVC),
-        'params': {'kernel': 'linear', 'classifier': svm.SVC, 'C': 2.3589230043835583}
-    },
-    { 
-        'name': 'Decision Tree',
-        'model': TwoLayersClassifier(classifier=tree.DecisionTreeClassifier),
-        'params': {'splitter': 'random', 'min_weight_fraction_leaf': 0, 'min_samples_split': 2, 'min_samples_leaf': 1, 'max_leaf_nodes': 1000, 'max_features': 'auto', 'max_depth': 30, 'criterion': 'gini', 'classifier': tree.DecisionTreeClassifier}
-    },
-    { 
-        'name': 'Random Forest',
-        'model': TwoLayersClassifier(classifier=ensemble.RandomForestClassifier),
-        'params': {'n_estimators': 47, 'min_weight_fraction_leaf': 0, 'min_samples_split': 3, 'min_samples_leaf': 1, 'max_features': 47, 'max_depth': 50, 'criterion': 'gini', 'classifier': ensemble.RandomForestClassifier}
-    },
-    { 
-        'name': 'XGBoost',
-        'model': TwoLayersClassifier(classifier=xgb.XGBClassifier),
-        'params': {'subsample': 0.8096394703054483, 'objective': 'binary:logistic', 'n_estimators': 110, 'max_depth': 20, 'learning_rate': 0.3795366772084956, 'colsample_bytree': 0.2584462705670777, 'classifier': xgb.XGBClassifier, 'booster': 'gbtree'}
-    },
-]
+        with open('output/results.out', 'a') as f:
+            f.write("Testing " + str(i) + ": " + name + "\n")
+        print(i, name, params)
+        test_results = test_method(model, params)
+        # print(test_results)
+        accuracies_test.append(test_results['accuracy'])
+        precisions_test.append(test_results['precision'])
+        recalls_test.append(test_results['recall'])
+        f1s_test.append(test_results['f1'])
 
+    accuracy_test_mean = np.mean(accuracies_test)
+    precision_test_mean = np.mean(precisions_test)
+    recall_test_mean = np.mean(recalls_test)
+    f1_test_mean = np.mean(f1s_test)
 
+    with open('output/results.out', 'a') as f:
+        f.write("\nTest \n")
+        f.write("Predictor: " + name + '\n')
+        f.write("Accuracies: " + str(accuracies_test) + '\n')
+        f.write("Accuracy mean: " + str(accuracy_test_mean) + '\n')
+        f.write("Precisions: " + str(precisions_test) + '\n')
+        f.write("Precision mean: " + str(precision_test_mean) + '\n')
+        f.write("Recalls: " + str(recalls_test) + '\n')
+        f.write("Recall mean: " + str(recall_test_mean) + '\n')
+        f.write("F1s: " + str(f1s_test) + '\n')
+        f.write("F1 mean: " + str(f1_test_mean) + '\n')
+        f.write('\n\n')
 
-for model_test in models_test:
-    name = model_test['name']
-    model = model_test['model']
-    params = model_test['params']
+    print("Method", name)
 
-    print(name)
-    test_method(model, params)
+    print('Accuracy test')
+    print(accuracies_test)
+    print(accuracy_test_mean)
+
+    print("Precision test")
+    print(precisions_test)
+    print(precision_test_mean)
+
+    print("Recall test")
+    print(recalls_test)
+    print(recall_test_mean)
+
+    print("F1 test")
+    print(f1s_test)
+    print(f1_test_mean)
+
+    print()
